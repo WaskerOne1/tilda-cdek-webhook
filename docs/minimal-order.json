@@ -1,0 +1,60 @@
+{
+  "type": 1,
+  "number": "TEST-001",
+  "tariff_code": 136,
+  "comment": "Тестовый заказ",
+
+  "sender": {
+    "name": "Тестовый отправитель",
+    "company": "ООО Тест",
+    "email": "test@example.com",
+    "phones": [
+      {
+        "number": "+79990000001"
+      }
+    ]
+  },
+
+  "recipient": {
+    "name": "Тестовый получатель",
+    "email": "client@example.com",
+    "phones": [
+      {
+        "number": "+79990000002"
+      }
+    ]
+  },
+
+  "from_location": {
+    "code": 44,
+    "address": "Москва, ул. Ленина, 1"
+  },
+
+  "to_location": {
+    "code": 137,
+    "address": "Санкт-Петербург, Невский пр., 1"
+  },
+
+  "packages": [
+    {
+      "number": "PKG-001",
+      "weight": 1000,
+      "length": 20,
+      "width": 20,
+      "height": 20,
+
+      "items": [
+        {
+          "name": "Тестовый товар",
+          "ware_key": "SKU-001",
+          "cost": 1000,
+          "payment": {
+            "value": 1000
+          },
+          "weight": 1000,
+          "amount": 1
+        }
+      ]
+    }
+  ]
+}
