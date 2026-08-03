@@ -3,7 +3,7 @@ from datetime import datetime, timedelta
 
 from app.auth import get_token
 from app.config import CDEK_API
-from app.logger import logger
+from app.logger import logger, log_response
 
 
 class CDEKClient:
@@ -19,10 +19,11 @@ class CDEKClient:
 
         self.authorize()
 
+    # -------------------------------------------------
+    # Авторизация
+    # -------------------------------------------------
+
     def authorize(self):
-        """
-        Получает OAuth токен и сохраняет его в Session.
-        """
 
         logger.info("Получаем OAuth токен...")
 
@@ -44,16 +45,10 @@ class CDEKClient:
         logger.success("OAuth токен успешно получен")
 
     def is_token_expired(self):
-        """
-        Проверяет срок действия токена.
-        """
 
         return datetime.now() >= self.token_expires
 
     def ensure_token(self):
-        """
-       Если токен истек — получает новый.
-        """
 
         if self.is_token_expired():
 
@@ -61,16 +56,21 @@ class CDEKClient:
 
             self.authorize()
 
+    # -------------------------------------------------
+    # Универсальный запрос
+    # -------------------------------------------------
+
     def _request(self, method: str, endpoint: str, **kwargs):
-        """
-        Универсальный метод выполнения HTTP-запросов.
-        """
 
         self.ensure_token()
 
         url = f"{self.base_url}{endpoint}"
 
+        logger.info("=" * 60)
         logger.info(f"{method} {url}")
+
+        if kwargs:
+            logger.info(f"Параметры запроса: {kwargs}")
 
         response = self.session.request(
             method=method,
@@ -78,23 +78,116 @@ class CDEKClient:
             **kwargs,
         )
 
-        logger.info(f"Статус ответа: {response.status_code}")
+        logger.info(f"HTTP {response.status_code}")
 
-        if not response.ok:
+        try:
+            response_data = response.json()
+        except ValueError:
+            response_data = response.text
 
-            logger.error(response.text)
+        log_response(response_data)
 
-            response.raise_for_status()
+        return {
+            "success": response.ok,
+            "status_code": response.status_code,
+            "data": response_data,
+        }
 
-        if response.content:
-            return response.json()
+    # -------------------------------------------------
+    # Города
+    # -------------------------------------------------
 
-        return None
+    def get_cities(
+        self,
+        city: str | None = None,
+        country_code: str = "RU",
+        size: int = 20,
+        page: int = 0,
+    ):
+
+        params = {
+            "country_codes": country_code,
+            "size": size,
+            "page": page,
+        }
+
+        if city:
+            params["city"] = city
+
+        return self._request(
+            "GET",
+            "/v2/location/cities",
+            params=params,
+        )
+
+    def find_city(self, city: str):
+
+        result = self.get_cities(city)
+
+        if not result["success"]:
+            return None
+
+        cities = result["data"]
+
+        if not cities:
+            return None
+
+        for item in cities:
+
+            if item["city"].lower() == city.lower():
+                return item
+
+        return cities[0]
+
+    def get_city_code(self, city: str):
+
+        city_data = self.find_city(city)
+
+        if city_data is None:
+            return None
+
+        return city_data["code"]
+
+    # -------------------------------------------------
+    # Пункты выдачи
+    # -------------------------------------------------
+
+    def get_offices(
+        self,
+        city: str | None = None,
+        city_code: int | None = None,
+        country_code: str = "RU",
+    ):
+
+        if city and city_code is None:
+
+            city_code = self.get_city_code(city)
+
+            if city_code is None:
+
+                return {
+                    "success": False,
+                    "status_code": 404,
+                    "data": f"Город '{city}' не найден",
+                }
+
+        params = {
+            "country_code": country_code,
+            "city_code": city_code,
+            "type": "PVZ",
+        }
+
+        return self._request(
+            "GET",
+            "/v2/deliverypoints",
+            params=params,
+        )
+
+    # -------------------------------------------------
+    # Калькулятор
+    # -------------------------------------------------
 
     def calculate_tariff(self, data: dict):
-        """
-        Расчет стоимости доставки.
-        """
 
         return self._request(
             "POST",
@@ -102,10 +195,11 @@ class CDEKClient:
             json=data,
         )
 
+    # -------------------------------------------------
+    # Заказы
+    # -------------------------------------------------
+
     def create_order(self, order: dict):
-        """
-        Создание заказа.
-        """
 
         return self._request(
             "POST",
@@ -114,9 +208,6 @@ class CDEKClient:
         )
 
     def get_order(self, uuid: str):
-        """
-        Получение заказа по UUID.
-        """
 
         return self._request(
             "GET",

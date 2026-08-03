@@ -14,9 +14,6 @@ def transform_order(order: Order) -> dict:
         "tariff_code": 136,
         "comment": order.comment,
 
-        "shipment_point": "MSK1",
-        "delivery_point": "SPB1",
-
         "recipient": {
             "name": order.customer_name,
             "email": order.customer_email,
