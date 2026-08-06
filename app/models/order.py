@@ -1,18 +1,64 @@
-from pydantic import BaseModel
+from dataclasses import dataclass, field
+from typing import List, Optional
 
 
-class Order(BaseModel):
+@dataclass
+class Customer:
+    """Информация о покупателе."""
 
-    order_number: str
+    name: str
+    phone: str
+    email: str = ""
 
-    customer_name: str
 
-    customer_phone: str
-
-    customer_email: str | None = None
+@dataclass
+class Address:
+    """Адрес доставки."""
 
     city: str
-
     address: str
+    postal_code: str = ""
+    pickup_point_id: Optional[str] = None
 
-    comment: str | None = None
+
+@dataclass
+class Item:
+    """Товар."""
+
+    external_id: str
+    name: str
+    quantity: int
+    price: float
+
+    # Заполняются CatalogResolver
+    weight: float = 0.0
+
+    length: int = 0
+    width: int = 0
+    height: int = 0
+
+
+@dataclass
+class Delivery:
+    """Доставка."""
+
+    type: str
+    price: float
+
+
+@dataclass
+class Order:
+    """Внутренняя модель заказа."""
+
+    order_id: str
+
+    customer: Customer
+
+    address: Address
+
+    delivery: Delivery
+
+    items: List[Item] = field(default_factory=list)
+
+    subtotal: float = 0.0
+    total: float = 0.0

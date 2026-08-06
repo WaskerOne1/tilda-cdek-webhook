@@ -1,9 +1,8 @@
 from fastapi import FastAPI, HTTPException
 
 from app.cdek_client import CDEKClient
-from app.models.order import Order
 from app.models.tariff import TariffRequest
-from app.transformer import transform_order, transform_tariff
+from app.transformer import parse_order_payload, transform_order, transform_tariff
 
 app = FastAPI()
 
@@ -24,10 +23,17 @@ async def root():
 
 @app.post("/calculate")
 async def calculate(data: TariffRequest):
-
+    """Generic tariff calculation endpoint. Не предназначен для этапов Tilda pickup-list/calculate."""
     payload = transform_tariff(data)
+    result = cdek.calculate_tariff(payload)
 
-    return cdek.calculate_tariff(payload)
+    if not result["success"]:
+        raise HTTPException(
+            status_code=result["status_code"],
+            detail=result["data"],
+        )
+
+    return result["data"]
 
 
 # -------------------------------------------------
@@ -35,11 +41,22 @@ async def calculate(data: TariffRequest):
 # -------------------------------------------------
 
 @app.post("/create-order")
-async def create_order(order: Order):
+async def create_order(order: dict):
+    """Принимает финальный webhook Tilda или готовый order JSON и создает заказ в СДЭК."""
+    try:
+        payload = transform_order(parse_order_payload(order))
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
 
-    payload = transform_order(order)
+    result = cdek.create_order(payload)
 
-    return cdek.create_order(payload)
+    if not result["success"]:
+        raise HTTPException(
+            status_code=result["status_code"],
+            detail=result["data"],
+        )
+
+    return result["data"]
 
 
 # -------------------------------------------------
@@ -143,3 +160,16 @@ async def get_offices(city: str):
         "count": len(offices),
         "items": offices,
     }
+
+
+@app.get("/offices/raw")
+async def get_offices_raw(city: str):
+    result = cdek.get_offices(city)
+
+    if not result["success"]:
+        raise HTTPException(
+            status_code=result["status_code"],
+            detail=result["data"],
+        )
+
+    return result["data"]

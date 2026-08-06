@@ -9,28 +9,25 @@ from app.logger import logger, log_response
 class CDEKClient:
 
     def __init__(self):
-
         self.base_url = CDEK_API
-
         self.session = requests.Session()
-
         self.token = None
         self.token_expires = None
-
-        self.authorize()
 
     # -------------------------------------------------
     # Авторизация
     # -------------------------------------------------
 
     def authorize(self):
-
         logger.info("Получаем OAuth токен...")
 
-        token_data = get_token()
+        try:
+            token_data = get_token()
+        except requests.RequestException as exc:
+            logger.error("Ошибка OAuth CDEK: %s", exc)
+            raise RuntimeError("CDEK authorization failed") from exc
 
         self.token = token_data["access_token"]
-
         self.token_expires = datetime.now() + timedelta(
             seconds=token_data["expires_in"]
         )
@@ -45,15 +42,15 @@ class CDEKClient:
         logger.success("OAuth токен успешно получен")
 
     def is_token_expired(self):
-
-        return datetime.now() >= self.token_expires
+        return (
+            self.token is None
+            or self.token_expires is None
+            or datetime.now() >= self.token_expires
+        )
 
     def ensure_token(self):
-
         if self.is_token_expired():
-
             logger.warning("OAuth токен истек. Получаем новый...")
-
             self.authorize()
 
     # -------------------------------------------------
@@ -61,8 +58,15 @@ class CDEKClient:
     # -------------------------------------------------
 
     def _request(self, method: str, endpoint: str, **kwargs):
-
-        self.ensure_token()
+        try:
+            self.ensure_token()
+        except Exception as exc:
+            logger.error("CDEK request failed before sending: %s", exc)
+            return {
+                "success": False,
+                "status_code": 502,
+                "data": str(exc),
+            }
 
         url = f"{self.base_url}{endpoint}"
 
@@ -72,11 +76,33 @@ class CDEKClient:
         if kwargs:
             logger.info(f"Параметры запроса: {kwargs}")
 
-        response = self.session.request(
-            method=method,
-            url=url,
-            **kwargs,
-        )
+        try:
+            response = self.session.request(
+                method=method,
+                url=url,
+                **kwargs,
+            )
+            response.raise_for_status()
+        except requests.RequestException as exc:
+            response_data = None
+            status_code = 502
+
+            if hasattr(exc, "response") and exc.response is not None:
+                try:
+                    response_data = exc.response.json()
+                except ValueError:
+                    response_data = exc.response.text
+                status_code = exc.response.status_code
+            else:
+                response_data = str(exc)
+
+            logger.error("CDEK request failed: %s", exc)
+            log_response(response_data)
+            return {
+                "success": False,
+                "status_code": status_code,
+                "data": response_data,
+            }
 
         logger.info(f"HTTP {response.status_code}")
 
