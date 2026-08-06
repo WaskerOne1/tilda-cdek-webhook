@@ -1,1 +1,7 @@
-pip install python-dotenv
+fastapi
+uvicorn
+requests
+loguru
+python-dotenv
+pytest
+pydantic
