@@ -112,7 +112,14 @@ def from_tilda_order(payload: Dict[str, Any]) -> Order:
     customer_name = payload.get("Name") or payment.get("delivery_fio") or ""
     customer_phone = payload.get("Phone") or ""
 
-    delivery_data = payment.get("delivery", {})
+    raw_delivery = payment.get("delivery", {})
+    # payment["delivery"] may be either a dict (detailed delivery data) or
+    # a string (delivery type/name). Normalize to a dict for downstream
+    # field access.
+    if isinstance(raw_delivery, dict):
+        delivery_data = raw_delivery
+    else:
+        delivery_data = {}
     address_city = (
         delivery_data.get("city")
         or payment.get("delivery_city")
@@ -161,7 +168,15 @@ def from_tilda_order(payload: Dict[str, Any]) -> Order:
             )
         )
 
-    delivery_type = payment.get("delivery") or "Доставка"
+    # Determine delivery type as a string. If payment['delivery'] is a dict,
+    # try to extract a 'type' field; if it's a string, use it directly.
+    raw_delivery_type = payment.get("delivery")
+    if isinstance(raw_delivery_type, dict):
+        delivery_type = raw_delivery_type.get("type") or "Доставка"
+    elif isinstance(raw_delivery_type, str):
+        delivery_type = raw_delivery_type
+    else:
+        delivery_type = "Доставка"
     delivery_price = _to_float(payment.get("delivery_price") or 0)
 
     subtotal = _to_float(payment.get("subtotal") or payment.get("amount") or 0)
