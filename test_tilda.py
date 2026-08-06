@@ -1,5 +1,7 @@
 ﻿import json
 from app.transformer import parse_order_payload, transform_order
+from app.logger import logger
+
 payload = {
     'Name': 'Кирилл',
     'Phone': '+7 (916) 077-47-40',
@@ -29,5 +31,5 @@ payload = {
     'formname': 'Cart'
 }
 order = parse_order_payload(payload)
-print(order)
-print(json.dumps(transform_order(order), ensure_ascii=False, indent=2))
+logger.info("%s", order)
+logger.info(json.dumps(transform_order(order), ensure_ascii=False, indent=2))
