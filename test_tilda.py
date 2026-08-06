@@ -3,17 +3,17 @@ from app.transformer import parse_order_payload, transform_order
 from app.logger import logger
 
 payload = {
-    'Name': 'Кирилл',
-    'Phone': '+7 (916) 077-47-40',
+    'Name': 'Иван Иванов',
+    'Phone': '+79990000000',
     'Checkbox': 'yes',
     'payment': {
-        'orderid': '2137044711',
+        'orderid': 'TEST_ORDER_001',
         'products': [
             {
                 'name': 'KORSHUN Шпатель для внутренних углов ВУ с зубчатыми пластинами',
                 'quantity': 1,
                 'amount': 4390,
-                'externalid': '50e24136-8198-11ef-acca-2cf05d712365',
+                'externalid': 'SKU-TEST-001',
                 'price': '4390'
             }
         ],
@@ -21,13 +21,15 @@ payload = {
         'subtotal': '4390',
         'delivery': 'Доставка по городу',
         'delivery_price': 350,
-        'delivery_fio': 'Иванков Кирилл Витальевич',
-        'delivery_city': 'Москва',
-        'delivery_address': 'RU: 121351, Москва, ул Ярцевская, 1А, struct.1',
+        'delivery_fio': 'Иван Иванов',
+        'delivery_city': 'Test City',
+        'delivery_address': 'Test address',
+        'delivery_comment': '',
+        'delivery_zip': '000000'
         'delivery_comment': '',
         'delivery_zip': '121351'
     },
-    'formid': 'form2307383831',
+    'formid': 'FORM_TEST_001',
     'formname': 'Cart'
 }
 order = parse_order_payload(payload)

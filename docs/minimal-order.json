@@ -10,7 +10,7 @@
     "email": "test@example.com",
     "phones": [
       {
-        "number": "+79990000001"
+        "number": "+79990000000"
       }
     ]
   },
@@ -20,19 +20,19 @@
     "email": "client@example.com",
     "phones": [
       {
-        "number": "+79990000002"
+        "number": "+79990000001"
       }
     ]
   },
 
   "from_location": {
     "code": 44,
-    "address": "Москва, ул. Ленина, 1"
+    "address": "Test address (from)"
   },
 
   "to_location": {
     "code": 137,
-    "address": "Санкт-Петербург, Невский пр., 1"
+    "address": "Test address (to)"
   },
 
   "packages": [
