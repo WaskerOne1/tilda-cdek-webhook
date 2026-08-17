@@ -288,10 +288,16 @@ def transform_tariff(data: TariffRequest) -> dict:
         from_location["address"] = data.from_address
     payload["from_location"] = from_location
 
-    # to_location или delivery_point
+    # to_location обязателен (с кодом города)
+    # Если указан delivery_point, to_code должен быть кодом города этого ПВЗ
+    if data.to_code:
+        payload["to_location"] = {"code": data.to_code}
+    else:
+        # Если to_code не указан, используем from_code (для расчета внутри города)
+        payload["to_location"] = {"code": data.from_code}
+
+    # Если указан delivery_point, добавляем его дополнительно
     if data.delivery_point:
         payload["delivery_point"] = data.delivery_point
-    elif data.to_code:
-        payload["to_location"] = {"code": data.to_code}
 
     return payload
