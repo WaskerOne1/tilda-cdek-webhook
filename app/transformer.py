@@ -269,11 +269,9 @@ def transform_order(order: Order) -> dict:
 def transform_tariff(data: TariffRequest) -> dict:
     """Преобразует запрос расчета тарифа в формат API СДЭК."""
 
-    return {
+    payload: Dict[str, Any] = {
         "type": 1,
         "tariff_code": data.tariff_code,
-        "from_location": {"code": data.from_code},
-        "to_location": {"code": data.to_code},
         "packages": [
             {
                 "weight": data.weight,
@@ -283,3 +281,17 @@ def transform_tariff(data: TariffRequest) -> dict:
             }
         ],
     }
+
+    # from_location с опциональным адресом
+    from_location = {"code": data.from_code}
+    if data.from_address:
+        from_location["address"] = data.from_address
+    payload["from_location"] = from_location
+
+    # to_location или delivery_point
+    if data.delivery_point:
+        payload["delivery_point"] = data.delivery_point
+    elif data.to_code:
+        payload["to_location"] = {"code": data.to_code}
+
+    return payload
