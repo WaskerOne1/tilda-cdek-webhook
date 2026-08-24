@@ -10,7 +10,7 @@ payload = {
         'orderid': 'TEST_ORDER_001',
         'products': [
             {
-                'name': 'KORSHUN Шпатель для внутренних углов ВУ с зубчатыми пластинами',
+                'name': 'Шпатель для внутренних углов ВУ с зубчатыми пластинами',
                 'quantity': 1,
                 'amount': 4390,
                 'externalid': 'SKU-TEST-001',
@@ -26,8 +26,6 @@ payload = {
         'delivery_address': 'Test address',
         'delivery_comment': '',
         'delivery_zip': '000000'
-        'delivery_comment': '',
-        'delivery_zip': '121351'
     },
     'formid': 'FORM_TEST_001',
     'formname': 'Cart'

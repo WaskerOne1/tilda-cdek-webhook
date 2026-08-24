@@ -1,4 +1,5 @@
 ﻿import json
+import math
 from typing import Any, Dict, List, Optional
 
 from app.config import (
@@ -30,6 +31,29 @@ def _to_float(value: Any, default: float = 0.0) -> float:
         return default
 
 
+def _mm_to_cm(value: Any, default: float = 0.0) -> float:
+    mm = _to_float(value, 0.0)
+    if mm <= 0:
+        return default
+    return mm / 10.0
+
+
+def _cm_to_cdek_number(value: Any, default: float = 0.0) -> int | float:
+    cm = _to_float(value, default)
+    # Для CDEK отправляем целое число, если дробной части нет,
+    # иначе сохраняем дробное значение без потери точности.
+    if float(cm).is_integer():
+        return int(cm)
+    return cm
+
+
+def _cm_to_cdek_int_ceil(value: Any, default: float = 0.0) -> int:
+    cm = _to_float(value, default)
+    if cm <= 0:
+        cm = default
+    return int(math.ceil(cm))
+
+
 def _normalize_phone(value: Any) -> str:
     if value is None:
         return ""
@@ -41,32 +65,37 @@ def _normalize_phone(value: Any) -> str:
 def _build_packages(items: List[Item]) -> List[Dict[str, Any]]:
     packages: List[Dict[str, Any]] = []
 
-    for index, item in enumerate(items, start=1):
-        quantity = item.quantity if item.quantity > 0 else 1
-        package_weight = int(item.weight * quantity) if item.weight else 1000
-        package_length = item.length or 20
-        package_width = item.width or 20
-        package_height = item.height or 20
+    package_index = 1
 
-        packages.append(
-            {
-                "number": f"PKG-{index}",
-                "weight": package_weight,
-                "length": package_length,
-                "width": package_width,
-                "height": package_height,
-                "items": [
-                    {
-                        "name": item.name,
-                        "ware_key": item.external_id,
-                        "cost": item.price,
-                        "payment": {"value": item.price},
-                        "weight": package_weight,
-                        "amount": quantity,
-                    }
-                ],
-            }
-        )
+    for item in items:
+        quantity = item.quantity if item.quantity > 0 else 1
+        package_weight = int(item.weight) if item.weight else 1000
+        package_length = _cm_to_cdek_int_ceil(item.length or 20.0, 20.0)
+        package_width = _cm_to_cdek_int_ceil(item.width or 20.0, 20.0)
+        package_height = _cm_to_cdek_int_ceil(item.height or 20.0, 20.0)
+
+        # Каждая физическая единица товара формируется как отдельное грузовое место.
+        for _ in range(quantity):
+            packages.append(
+                {
+                    "number": f"PKG-{package_index}",
+                    "weight": package_weight,
+                    "length": package_length,
+                    "width": package_width,
+                    "height": package_height,
+                    "items": [
+                        {
+                            "name": item.name,
+                            "ware_key": item.external_id,
+                            "cost": item.price,
+                            "payment": {"value": item.price},
+                            "weight": package_weight,
+                            "amount": 1,
+                        }
+                    ],
+                }
+            )
+            package_index += 1
 
     return packages
 
@@ -162,9 +191,9 @@ def from_tilda_order(payload: Dict[str, Any]) -> Order:
                 quantity=_to_int(product.get("quantity") or 1, 1),
                 price=_to_float(product.get("price") or product.get("amount") or 0),
                 weight=_to_float(product.get("pack_m") or 0),
-                length=_to_int(product.get("pack_x") or 0),
-                width=_to_int(product.get("pack_y") or 0),
-                height=_to_int(product.get("pack_z") or 0),
+                length=_mm_to_cm(product.get("pack_x"), 0.0),
+                width=_mm_to_cm(product.get("pack_y"), 0.0),
+                height=_mm_to_cm(product.get("pack_z"), 0.0),
             )
         )
 
@@ -274,10 +303,10 @@ def transform_tariff(data: TariffRequest) -> dict:
         "tariff_code": data.tariff_code,
         "packages": [
             {
-                "weight": data.weight,
-                "length": data.length,
-                "width": data.width,
-                "height": data.height,
+                "weight": int(_to_float(data.weight, 0.0)),
+                "length": _cm_to_cdek_int_ceil(_mm_to_cm(data.length, 0.0), 0.0),
+                "width": _cm_to_cdek_int_ceil(_mm_to_cm(data.width, 0.0), 0.0),
+                "height": _cm_to_cdek_int_ceil(_mm_to_cm(data.height, 0.0), 0.0),
             }
         ],
     }

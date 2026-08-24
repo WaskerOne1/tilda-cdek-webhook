@@ -33,9 +33,9 @@ class Item:
     # Заполняются CatalogResolver
     weight: float = 0.0
 
-    length: int = 0
-    width: int = 0
-    height: int = 0
+    length: float = 0.0
+    width: float = 0.0
+    height: float = 0.0
 
 
 @dataclass

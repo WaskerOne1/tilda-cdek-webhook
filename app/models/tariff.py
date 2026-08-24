@@ -13,10 +13,10 @@ class TariffRequest(BaseModel):
 
     delivery_point: Optional[str] = None
 
-    weight: int
+    weight: float
 
-    length: int
+    length: float
 
-    width: int
+    width: float
 
-    height: int
+    height: float

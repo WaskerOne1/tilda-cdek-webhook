@@ -7,7 +7,7 @@ __pycache__/
 .venv/
 
 # Environment variables
-.env
+# .env is tracked in this repository for test/demo convenience.
 
 # VS Code
 .vscode/
