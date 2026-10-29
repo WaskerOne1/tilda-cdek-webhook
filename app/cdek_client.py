@@ -221,6 +221,13 @@ class CDEKClient:
             json=data,
         )
 
+    def calculate_tariff_list(self, data: dict):
+        return self._request(
+            "POST",
+            "/v2/calculator/tarifflist",
+            json=data,
+        )
+
     # -------------------------------------------------
     # Заказы
     # -------------------------------------------------

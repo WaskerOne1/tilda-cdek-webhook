@@ -1,8 +1,15 @@
 from fastapi import FastAPI, HTTPException
 
 from app.cdek_client import CDEKClient
+from app.config import SENDER_CITY_CODE
 from app.models.tariff import TariffRequest
-from app.transformer import parse_order_payload, transform_order, transform_tariff
+from app.transformer import (
+    parse_order_payload,
+    select_preferred_tariff,
+    transform_order,
+    transform_order_tariff_list,
+    transform_tariff,
+)
 
 app = FastAPI()
 
@@ -44,7 +51,43 @@ async def calculate(data: TariffRequest):
 async def create_order(order: dict):
     """Принимает финальный webhook Tilda или готовый order JSON и создает заказ в СДЭК."""
     try:
-        payload = transform_order(parse_order_payload(order))
+        parsed_order = parse_order_payload(order)
+
+        if parsed_order.address.pickup_point_id:
+            try:
+                sender_city_code = int(SENDER_CITY_CODE)
+            except (TypeError, ValueError):
+                raise ValueError(
+                    "Invalid configuration SENDER_CITY_CODE: expected a positive integer"
+                ) from None
+
+            if sender_city_code <= 0:
+                raise ValueError(
+                    "Invalid configuration SENDER_CITY_CODE: expected a positive integer"
+                )
+
+            recipient_city_code = cdek.get_city_code(parsed_order.address.city)
+            if not recipient_city_code:
+                raise ValueError(
+                    f"Recipient city '{parsed_order.address.city}' was not found in CDEK"
+                )
+
+            tariff_request = transform_order_tariff_list(
+                parsed_order,
+                sender_city_code=sender_city_code,
+                recipient_city_code=recipient_city_code,
+            )
+            tariff_result = cdek.calculate_tariff_list(tariff_request)
+            if not tariff_result["success"]:
+                raise HTTPException(
+                    status_code=tariff_result["status_code"],
+                    detail=tariff_result["data"],
+                )
+
+            selected_tariff_code = select_preferred_tariff(tariff_result["data"])
+            payload = transform_order(parsed_order, tariff_code=selected_tariff_code)
+        else:
+            payload = transform_order(parsed_order)
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error))
 

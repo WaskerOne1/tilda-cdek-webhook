@@ -1,6 +1,8 @@
-import os
+import pytest
 
-# Set minimal required environment variables for tests so imports won't fail.
-os.environ.setdefault('SENDER_LOCATION_CODE', 'SENDER1')
-os.environ.setdefault('SENDER_LOCATION_ADDRESS', 'Sender address')
-os.environ.setdefault('SENDER_PHONE', '+70000000000')
+from app import transformer
+
+@pytest.fixture(autouse=True)
+def configured_sender_route(monkeypatch):
+    monkeypatch.setattr(transformer, "SENDER_SHIPMENT_POINT", "TEST-SHIPMENT-PVZ")
+    monkeypatch.setattr(transformer, "DEFAULT_TARIFF_CODE", "21")

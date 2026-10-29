@@ -3,18 +3,17 @@ import math
 from typing import Any, Dict, List, Optional
 
 from app.config import (
-    DEFAULT_FROM_LOCATION_ADDRESS,
-    DEFAULT_FROM_LOCATION_CODE,
     DEFAULT_TARIFF_CODE,
     SENDER_COMPANY,
     SENDER_EMAIL,
-    SENDER_LOCATION_ADDRESS,
-    SENDER_LOCATION_CODE,
     SENDER_NAME,
     SENDER_PHONE,
+    SENDER_SHIPMENT_POINT,
 )
 from app.models.order import Address, Customer, Delivery, Item, Order
 from app.models.tariff import TariffRequest
+
+PREFERRED_PVZ_TARIFF_CODE = 136
 
 
 def _to_int(value: Any, default: int = 0) -> int:
@@ -100,13 +99,33 @@ def _build_packages(items: List[Item]) -> List[Dict[str, Any]]:
     return packages
 
 
-def _get_first_available_code(*values: Optional[str]) -> int:
-    for value in values:
-        if value is not None and value != "":
-            code = _to_int(value)
-            if code:
-                return code
-    return 0
+def _required_tariff_code(value: Any) -> int:
+    if value is None or not str(value).strip():
+        raise ValueError("Missing required configuration: DEFAULT_TARIFF_CODE")
+
+    try:
+        tariff_code = int(str(value).strip())
+    except (TypeError, ValueError):
+        raise ValueError(
+            "Invalid configuration DEFAULT_TARIFF_CODE: expected a positive integer"
+        ) from None
+
+    if tariff_code <= 0:
+        raise ValueError(
+            "Invalid configuration DEFAULT_TARIFF_CODE: expected a positive integer"
+        )
+
+    return tariff_code
+
+
+def _required_shipment_point(value: Any) -> str:
+    shipment_point = str(value).strip() if value is not None else ""
+    if not shipment_point:
+        raise ValueError(
+            "Missing required configuration: SENDER_SHIPMENT_POINT "
+            "(CDEK pickup point code for the sender)"
+        )
+    return shipment_point
 
 
 def _load_tildapayment(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -254,16 +273,21 @@ def parse_order_payload(payload: Dict[str, Any]) -> Order:
     )
 
 
-def transform_order(order: Order) -> dict:
+def transform_order(order: Order, tariff_code: Optional[int] = None) -> dict:
     """Преобразует внутреннюю модель заказа в формат API СДЭК."""
 
     if not order.customer.phone:
         raise ValueError("Телефон получателя обязателен")
 
+    shipment_point = _required_shipment_point(SENDER_SHIPMENT_POINT)
+    selected_tariff_code = _required_tariff_code(
+        tariff_code if tariff_code is not None else DEFAULT_TARIFF_CODE
+    )
+
     payload: Dict[str, Any] = {
         "type": 1,
         "number": str(order.order_id),
-        "tariff_code": _to_int(getattr(order, "tariff_code", DEFAULT_TARIFF_CODE)),
+        "tariff_code": selected_tariff_code,
         "comment": getattr(order, "comment", ""),
         "sender": {
             "name": SENDER_NAME,
@@ -276,10 +300,7 @@ def transform_order(order: Order) -> dict:
             "email": order.customer.email,
             "phones": [{"number": _normalize_phone(order.customer.phone)}],
         },
-        "from_location": {
-            "code": _get_first_available_code(SENDER_LOCATION_CODE, DEFAULT_FROM_LOCATION_CODE),
-            "address": SENDER_LOCATION_ADDRESS or DEFAULT_FROM_LOCATION_ADDRESS,
-        },
+        "shipment_point": shipment_point,
         "packages": _build_packages(order.items),
     }
 
@@ -293,6 +314,68 @@ def transform_order(order: Order) -> dict:
         }
 
     return payload
+
+
+def transform_order_tariff_list(
+    order: Order,
+    sender_city_code: int,
+    recipient_city_code: int,
+) -> dict:
+    """Build the available-tariffs request using an order's actual route/packages."""
+
+    if sender_city_code <= 0 or recipient_city_code <= 0:
+        raise ValueError("Calculator route requires positive sender and recipient city codes")
+
+    payload: Dict[str, Any] = {
+        "type": 1,
+        "from_location": {"code": sender_city_code},
+        "to_location": {"code": recipient_city_code},
+        "shipment_point": _required_shipment_point(SENDER_SHIPMENT_POINT),
+        "packages": _build_packages(order.items),
+    }
+
+    if order.address.pickup_point_id:
+        payload["delivery_point"] = order.address.pickup_point_id
+    else:
+        payload["to_location"].update(
+            {
+                "city": order.address.city,
+                "postal_code": order.address.postal_code,
+                "address": order.address.address,
+            }
+        )
+
+    return payload
+
+
+def select_preferred_tariff(
+    tariff_list_response: Dict[str, Any],
+    preferred_tariff_code: int = PREFERRED_PVZ_TARIFF_CODE,
+) -> int:
+    """Select only the preferred tariff; never fall back to another service."""
+
+    tariff_codes = tariff_list_response.get("tariff_codes")
+    if not isinstance(tariff_codes, list):
+        raise ValueError("CDEK tariff-list response does not contain tariff_codes")
+
+    for tariff in tariff_codes:
+        if not isinstance(tariff, dict):
+            continue
+        if _to_int(tariff.get("tariff_code"), -1) == preferred_tariff_code:
+            return preferred_tariff_code
+
+    available_codes = sorted(
+        {
+            code
+            for tariff in tariff_codes
+            if isinstance(tariff, dict)
+            and (code := _to_int(tariff.get("tariff_code"), -1)) > 0
+        }
+    )
+    raise ValueError(
+        f"Preferred tariff {preferred_tariff_code} is unavailable for this route; "
+        f"no fallback selected. Available tariff codes: {available_codes}"
+    )
 
 
 def transform_tariff(data: TariffRequest) -> dict:
@@ -328,5 +411,15 @@ def transform_tariff(data: TariffRequest) -> dict:
     # Если указан delivery_point, добавляем его дополнительно
     if data.delivery_point:
         payload["delivery_point"] = data.delivery_point
+    if data.shipment_point:
+        payload["shipment_point"] = data.shipment_point
 
+    return payload
+
+
+def transform_tariff_list(data: TariffRequest) -> dict:
+    """Builds the available-tariffs calculator payload for the same route."""
+
+    payload = transform_tariff(data)
+    payload.pop("tariff_code", None)
     return payload

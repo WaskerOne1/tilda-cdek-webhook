@@ -11,6 +11,8 @@ class TariffRequest(BaseModel):
 
     from_address: Optional[str] = None
 
+    shipment_point: Optional[str] = None
+
     delivery_point: Optional[str] = None
 
     weight: float
