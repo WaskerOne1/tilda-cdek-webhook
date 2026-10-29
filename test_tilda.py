@@ -1,5 +1,4 @@
-﻿import json
-from app.transformer import parse_order_payload, transform_order
+﻿from app.transformer import parse_order_payload, transform_order
 from app.logger import logger
 
 payload = {
@@ -31,5 +30,5 @@ payload = {
     'formname': 'Cart'
 }
 order = parse_order_payload(payload)
-logger.info("%s", order)
-logger.info(json.dumps(transform_order(order), ensure_ascii=False, indent=2))
+transform_order(order)
+logger.info("Tilda transformation test completed")

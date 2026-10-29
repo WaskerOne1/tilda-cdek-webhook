@@ -3,7 +3,7 @@ from datetime import datetime, timedelta
 
 from app.auth import get_token
 from app.config import CDEK_API
-from app.logger import logger, log_response
+from app.logger import logger
 
 
 class CDEKClient:
@@ -24,7 +24,7 @@ class CDEKClient:
         try:
             token_data = get_token()
         except requests.RequestException as exc:
-            logger.error("Ошибка OAuth CDEK: %s", exc)
+            logger.error("Ошибка OAuth CDEK")
             raise RuntimeError("CDEK authorization failed") from exc
 
         self.token = token_data["access_token"]
@@ -73,9 +73,6 @@ class CDEKClient:
         logger.info("=" * 60)
         logger.info(f"{method} {url}")
 
-        if kwargs:
-            logger.info(f"Параметры запроса: {kwargs}")
-
         try:
             response = self.session.request(
                 method=method,
@@ -96,8 +93,7 @@ class CDEKClient:
             else:
                 response_data = str(exc)
 
-            logger.error("CDEK request failed: %s", exc)
-            log_response(response_data)
+            logger.error("CDEK request failed (HTTP %s)", status_code)
             return {
                 "success": False,
                 "status_code": status_code,
@@ -110,8 +106,6 @@ class CDEKClient:
             response_data = response.json()
         except ValueError:
             response_data = response.text
-
-        log_response(response_data)
 
         return {
             "success": response.ok,

@@ -1,12 +1,13 @@
 import json
-import asyncio
+import sqlite3
+from pathlib import Path
 
 import pytest
-from fastapi import HTTPException
 
-from app import transformer
 from app import main as app_main
+from app import transformer
 from app.cdek_client import CDEKClient
+from app import cdek_client as cdek_client_module
 from app.models.tariff import TariffRequest
 from app.transformer import (
     parse_order_payload,
@@ -44,6 +45,25 @@ def _single_product(quantity: int = 1, pack_m: str = "200", pack_x: str = "180",
         "quantity": quantity,
         "amount": 0,
     }
+
+
+def _webhook_headers(token: str = "test-webhook-secret") -> dict[str, str]:
+    return {"X-Tilda-Webhook-Token": token}
+
+
+def _fail_on_cdek_calls(monkeypatch):
+    calls = []
+
+    def fail(method_name):
+        def unexpected_call(*args, **kwargs):
+            calls.append(method_name)
+            raise AssertionError(f"Unexpected CDEK method call: {method_name}")
+
+        return unexpected_call
+
+    for method_name in ("get_city_code", "calculate_tariff_list", "create_order"):
+        monkeypatch.setattr(app_main.cdek, method_name, fail(method_name))
+    return calls
 
 
 def test_a_single_product_package_units_converted_mm_to_cm():
@@ -331,6 +351,48 @@ def test_cdek_client_uses_tariff_list_endpoint_without_network(monkeypatch):
         "json": payload,
     }
 
+def test_cdek_client_does_not_log_request_or_response_pii(monkeypatch):
+    logged_messages = []
+
+    def capture_log(message, *args):
+        logged_messages.append(str(message).format(*args))
+
+    class FakeResponse:
+        ok = True
+        status_code = 200
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "recipient": {
+                    "phone": "+70000000000",
+                    "address": "Sensitive test address",
+                }
+            }
+
+    client = CDEKClient()
+    monkeypatch.setattr(cdek_client_module.logger, "info", capture_log)
+    monkeypatch.setattr(client, "ensure_token", lambda: None)
+    monkeypatch.setattr(client.session, "request", lambda **kwargs: FakeResponse())
+
+    result = client._request(
+        "POST",
+        "/v2/orders",
+        json={
+            "recipient": {
+                "phone": "+70000000000",
+                "address": "Sensitive test address",
+            }
+        },
+    )
+
+    assert result["success"] is True
+    all_logs = " ".join(logged_messages)
+    assert "+70000000000" not in all_logs
+    assert "Sensitive test address" not in all_logs
+
 
 def test_preferred_tariff_136_is_selected_over_483():
     response = {
@@ -376,7 +438,12 @@ def test_order_tariff_list_payload_uses_order_packages_and_both_pvz_codes():
     assert all(package["items"][0]["amount"] == 1 for package in request["packages"])
 
 
-def test_create_order_uses_tariff_136_only_after_tarifflist_confirms_it(monkeypatch):
+@pytest.mark.parametrize(
+    "content_type", ["application/json", "application/x-www-form-urlencoded"]
+)
+def test_create_order_uses_tariff_136_only_after_tarifflist_confirms_it(
+    webhook_call, monkeypatch, content_type
+):
     order_input = _build_tilda_payload(
         products=[_single_product()],
         delivery={"city": "Москва", "pickup-id": "MSK481"},
@@ -401,20 +468,31 @@ def test_create_order_uses_tariff_136_only_after_tarifflist_confirms_it(monkeypa
 
     def fake_create_order(payload):
         captured["order_payload"] = payload
-        return {"success": True, "status_code": 202, "data": {"entity": {"number": payload["number"]}}}
+        return {
+            "success": True,
+            "status_code": 202,
+            "data": {"entity": {"number": payload["number"], "uuid": "uuid-test-136"}},
+        }
 
     monkeypatch.setattr(app_main.cdek, "calculate_tariff_list", fake_tariff_list)
     monkeypatch.setattr(app_main.cdek, "create_order", fake_create_order)
 
-    response = asyncio.run(app_main.create_order(order_input))
+    response = webhook_call(
+        order_input,
+        headers=_webhook_headers(),
+        content_type=content_type,
+    )
 
-    assert response["entity"]["number"] == "TST-TARIFF-136"
+    assert response.status_code == 200
+    assert response.json()["entity"]["number"] == "TST-TARIFF-136"
     assert captured["tariff_request"]["shipment_point"] == "TEST-SHIPMENT-PVZ"
     assert captured["tariff_request"]["delivery_point"] == "MSK481"
     assert captured["order_payload"]["tariff_code"] == 136
 
 
-def test_create_order_does_not_call_order_api_if_tariff_136_is_unavailable(monkeypatch):
+def test_create_order_does_not_call_order_api_if_tariff_136_is_unavailable(
+    webhook_call, monkeypatch
+):
     order_input = _build_tilda_payload(
         products=[_single_product()],
         delivery={"city": "Москва", "pickup-id": "MSK481"},
@@ -439,7 +517,305 @@ def test_create_order_does_not_call_order_api_if_tariff_136_is_unavailable(monke
 
     monkeypatch.setattr(app_main.cdek, "create_order", unexpected_create_order)
 
-    with pytest.raises(HTTPException, match="Preferred tariff 136 is unavailable"):
-        asyncio.run(app_main.create_order(order_input))
+    response = webhook_call(order_input, headers=_webhook_headers())
 
+    assert response.status_code == 400
+    assert "Preferred tariff 136 is unavailable" in response.json()["detail"]
     assert create_order_called is False
+
+
+def test_orderid_can_retry_after_pre_create_tariff_failure(webhook_call, monkeypatch):
+    payload = _build_tilda_payload(
+        products=[_single_product()],
+        delivery={"city": "Москва", "pickup-id": "MSK481"},
+        order_id="TST-RETRY-AFTER-TARIFF-FAILURE",
+    )
+    tariff_attempts = 0
+    create_attempts = 0
+
+    monkeypatch.setattr(app_main.cdek, "get_city_code", lambda city: 44)
+
+    def tariff_list(request):
+        nonlocal tariff_attempts
+        tariff_attempts += 1
+        tariff_codes = [] if tariff_attempts == 1 else [{"tariff_code": 136}]
+        return {"success": True, "status_code": 200, "data": {"tariff_codes": tariff_codes}}
+
+    def create_order(order):
+        nonlocal create_attempts
+        create_attempts += 1
+        return {
+            "success": True,
+            "status_code": 202,
+            "data": {"entity": {"uuid": "uuid-after-retry", "number": order["number"]}},
+        }
+
+    monkeypatch.setattr(app_main.cdek, "calculate_tariff_list", tariff_list)
+    monkeypatch.setattr(app_main.cdek, "create_order", create_order)
+
+    first = webhook_call(payload, headers=_webhook_headers())
+    second = webhook_call(payload, headers=_webhook_headers())
+
+    assert first.status_code == 400
+    assert "Preferred tariff 136 is unavailable" in first.json()["detail"]
+    assert second.status_code == 200
+    assert second.json()["entity"]["uuid"] == "uuid-after-retry"
+    assert tariff_attempts == 2
+    assert create_attempts == 1
+
+
+def test_orderid_can_retry_after_payload_build_failure(webhook_call, monkeypatch):
+    payload = _build_tilda_payload(
+        products=[_single_product()],
+        delivery={"city": "Москва", "pickup-id": "MSK481"},
+        order_id="TST-RETRY-AFTER-BUILD-FAILURE",
+    )
+    transform_attempts = 0
+    create_attempts = 0
+    original_transform_order = app_main.transform_order
+
+    monkeypatch.setattr(app_main.cdek, "get_city_code", lambda city: 44)
+    monkeypatch.setattr(
+        app_main.cdek,
+        "calculate_tariff_list",
+        lambda request: {
+            "success": True,
+            "status_code": 200,
+            "data": {"tariff_codes": [{"tariff_code": 136}]},
+        },
+    )
+
+    def fail_transform_once(order, tariff_code=None):
+        nonlocal transform_attempts
+        transform_attempts += 1
+        if transform_attempts == 1:
+            raise ValueError("simulated payload build failure")
+        return original_transform_order(order, tariff_code=tariff_code)
+
+    def create_order(order):
+        nonlocal create_attempts
+        create_attempts += 1
+        return {
+            "success": True,
+            "status_code": 202,
+            "data": {"entity": {"uuid": "uuid-after-build-retry", "number": order["number"]}},
+        }
+
+    monkeypatch.setattr(app_main, "transform_order", fail_transform_once)
+    monkeypatch.setattr(app_main.cdek, "create_order", create_order)
+
+    first = webhook_call(payload, headers=_webhook_headers())
+    second = webhook_call(payload, headers=_webhook_headers())
+
+    assert first.status_code == 400
+    assert first.json()["detail"] == "simulated payload build failure"
+    assert second.status_code == 200
+    assert second.json()["entity"]["uuid"] == "uuid-after-build-retry"
+    assert transform_attempts == 2
+    assert create_attempts == 1
+
+
+def test_webhook_without_configured_secret_is_closed(webhook_call, monkeypatch):
+    monkeypatch.setattr(app_main, "TILDA_WEBHOOK_SECRET", None)
+    cdek_calls = _fail_on_cdek_calls(monkeypatch)
+    response = webhook_call({"test": "test"})
+
+    assert response.status_code == 503
+    assert cdek_calls == []
+
+
+def test_create_order_openapi_documents_json_and_form_bodies():
+    operation = app_main.app.openapi()["paths"]["/create-order"]["post"]
+    content = operation["requestBody"]["content"]
+
+    assert "application/json" in content
+    assert "application/x-www-form-urlencoded" in content
+
+
+@pytest.mark.parametrize("headers", [{}, {"X-Tilda-Webhook-Token": "wrong-token"}])
+def test_webhook_rejects_missing_or_invalid_header_without_cdek(
+    webhook_call, monkeypatch, headers
+):
+    cdek_calls = _fail_on_cdek_calls(monkeypatch)
+    response = webhook_call(
+        {"test": "test"},
+        headers=headers,
+        query_string="X-Tilda-Webhook-Token=test-webhook-secret",
+    )
+
+    assert response.status_code == 401
+    assert cdek_calls == []
+
+
+def test_authenticated_form_test_test_returns_ok_without_cdek(webhook_call, monkeypatch):
+    cdek_calls = _fail_on_cdek_calls(monkeypatch)
+    response = webhook_call(
+        {"test": "test", "orderid": "TEST-SERVICE-HOOK"},
+        headers=_webhook_headers(),
+        content_type="application/x-www-form-urlencoded",
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok", "message": "Tilda webhook test received"}
+    assert cdek_calls == []
+    assert not Path(app_main.ORDER_IDEMPOTENCY_DB_PATH).exists()
+
+
+def test_authenticated_json_test_test_returns_ok_without_cdek(webhook_call, monkeypatch):
+    cdek_calls = _fail_on_cdek_calls(monkeypatch)
+    response = webhook_call(
+        {"test": "test", "orderid": "TEST-SERVICE-HOOK-JSON"},
+        headers=_webhook_headers(),
+    )
+
+    assert response.status_code == 200
+    assert cdek_calls == []
+    assert not Path(app_main.ORDER_IDEMPOTENCY_DB_PATH).exists()
+
+
+def test_test_test_without_valid_secret_is_rejected(webhook_call, monkeypatch):
+    cdek_calls = _fail_on_cdek_calls(monkeypatch)
+    response = webhook_call(
+        {"test": "test", "orderid": "TEST-UNAUTHENTICATED"},
+        content_type="application/x-www-form-urlencoded",
+    )
+    assert response.status_code == 401
+    assert cdek_calls == []
+
+
+def test_real_webhook_without_orderid_is_rejected_before_cdek(webhook_call, monkeypatch):
+    payload = _build_tilda_payload(
+        products=[_single_product()],
+        delivery={"city": "Москва", "pickup-id": "MSK481"},
+    )
+    payload.pop("orderid")
+    cdek_calls = _fail_on_cdek_calls(monkeypatch)
+    response = webhook_call(payload, headers=_webhook_headers())
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Tilda orderid is required"
+    assert cdek_calls == []
+
+
+def test_orderid_inside_tildapayment_is_used_when_payment_is_empty(
+    webhook_call, monkeypatch
+):
+    payload = _build_tilda_payload(
+        products=[_single_product()],
+        delivery={"city": "Москва", "pickup-id": "MSK481"},
+    )
+    payload.pop("orderid")
+    payment_data = json.loads(payload["tildapayment"])
+    payment_data["orderid"] = "TST-NESTED-ORDERID"
+    payload["tildapayment"] = json.dumps(payment_data)
+    payload["payment"] = {}
+    captured = {}
+
+    monkeypatch.setattr(app_main.cdek, "get_city_code", lambda city: 44)
+    monkeypatch.setattr(
+        app_main.cdek,
+        "calculate_tariff_list",
+        lambda request: {
+            "success": True,
+            "status_code": 200,
+            "data": {"tariff_codes": [{"tariff_code": 136}]},
+        },
+    )
+
+    def fake_create_order(order):
+        captured.update(order)
+        return {
+            "success": True,
+            "status_code": 202,
+            "data": {"entity": {"uuid": "uuid-nested", "number": order["number"]}},
+        }
+
+    monkeypatch.setattr(app_main.cdek, "create_order", fake_create_order)
+    response = webhook_call(payload, headers=_webhook_headers())
+
+    assert response.status_code == 200
+    assert captured["number"] == "TST-NESTED-ORDERID"
+
+
+def test_successful_orderid_repeat_returns_saved_result_without_second_cdek_call(
+    webhook_call, monkeypatch
+):
+    payload = _build_tilda_payload(
+        products=[_single_product()],
+        delivery={"city": "Москва", "pickup-id": "MSK481"},
+        order_id="TST-IDEMPOTENT-1",
+    )
+    calls = {"tarifflist": 0, "create_order": 0}
+
+    monkeypatch.setattr(app_main.cdek, "get_city_code", lambda city: 44)
+
+    def fake_tariff_list(request):
+        calls["tarifflist"] += 1
+        return {
+            "success": True,
+            "status_code": 200,
+            "data": {"tariff_codes": [{"tariff_code": 136}]},
+        }
+
+    def fake_create_order(order):
+        calls["create_order"] += 1
+        return {
+            "success": True,
+            "status_code": 202,
+            "data": {"entity": {"uuid": "uuid-idempotent-1", "number": order["number"]}},
+        }
+
+    monkeypatch.setattr(app_main.cdek, "calculate_tariff_list", fake_tariff_list)
+    monkeypatch.setattr(app_main.cdek, "create_order", fake_create_order)
+
+    first = webhook_call(payload, headers=_webhook_headers())
+    second = webhook_call(payload, headers=_webhook_headers())
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert second.json() == first.json()
+    assert second.json()["entity"]["uuid"] == "uuid-idempotent-1"
+    assert calls == {"tarifflist": 1, "create_order": 1}
+    with sqlite3.connect(app_main.ORDER_IDEMPOTENCY_DB_PATH) as connection:
+        row = connection.execute(
+            "SELECT state, cdek_uuid, result_json FROM tilda_orders WHERE order_id = ?",
+            ("TST-IDEMPOTENT-1",),
+        ).fetchone()
+    assert row[0] == "succeeded"
+    assert row[1] == "uuid-idempotent-1"
+    assert json.loads(row[2]) == first.json()
+
+
+def test_ambiguous_cdek_result_blocks_retry_for_same_orderid(webhook_call, monkeypatch):
+    payload = _build_tilda_payload(
+        products=[_single_product()],
+        delivery={"city": "Москва", "pickup-id": "MSK481"},
+        order_id="TST-IDEMPOTENT-UNCERTAIN",
+    )
+    create_calls = 0
+
+    monkeypatch.setattr(app_main.cdek, "get_city_code", lambda city: 44)
+    monkeypatch.setattr(
+        app_main.cdek,
+        "calculate_tariff_list",
+        lambda request: {
+            "success": True,
+            "status_code": 200,
+            "data": {"tariff_codes": [{"tariff_code": 136}]},
+        },
+    )
+
+    def ambiguous_create_order(order):
+        nonlocal create_calls
+        create_calls += 1
+        raise TimeoutError("simulated CDEK timeout")
+
+    monkeypatch.setattr(app_main.cdek, "create_order", ambiguous_create_order)
+
+    first = webhook_call(payload, headers=_webhook_headers())
+    second = webhook_call(payload, headers=_webhook_headers())
+
+    assert first.status_code == 502
+    assert second.status_code == 409
+    assert "uncertain" in second.json()["detail"]
+    assert create_calls == 1

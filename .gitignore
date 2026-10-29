@@ -16,6 +16,12 @@ __pycache__/
 logs/
 *.log
 
+# Runtime idempotency database
+data/*.sqlite3
+
+# Runtime idempotency storage
+data/*.sqlite3
+
 # OS
 .DS_Store
 Thumbs.db

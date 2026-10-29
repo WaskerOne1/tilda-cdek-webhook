@@ -1,7 +1,17 @@
+import hmac
+import json
+from urllib.parse import parse_qsl
+
 from fastapi import FastAPI, HTTPException
+from starlette.requests import Request
 
 from app.cdek_client import CDEKClient
-from app.config import SENDER_CITY_CODE
+from app.config import (
+    ORDER_IDEMPOTENCY_DB_PATH,
+    SENDER_CITY_CODE,
+    TILDA_WEBHOOK_SECRET,
+)
+from app.idempotency import IdempotencyStore
 from app.models.tariff import TariffRequest
 from app.transformer import (
     parse_order_payload,
@@ -14,6 +24,63 @@ from app.transformer import (
 app = FastAPI()
 
 cdek = CDEKClient()
+
+
+def _parse_webhook_body(body: bytes, content_type: str) -> dict:
+    media_type = content_type.split(";", 1)[0].strip().lower()
+    try:
+        if media_type == "application/json" or body.lstrip().startswith(b"{"):
+            payload = json.loads(body)
+        else:
+            fields = parse_qsl(body.decode("utf-8"), keep_blank_values=True)
+            payload = {key: value for key, value in fields}
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        raise HTTPException(status_code=400, detail="Invalid webhook body") from None
+
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Webhook body must be an object")
+    return payload
+
+
+def _payment_candidates(payload: dict) -> list[dict]:
+    candidates = []
+    for key in ("tildapayment", "payment"):
+        value = payload.get(key)
+        if isinstance(value, dict):
+            candidates.append(value)
+        elif isinstance(value, str):
+            try:
+                parsed = json.loads(value)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(parsed, dict):
+                candidates.append(parsed)
+    return candidates
+
+
+def _extract_order_id(payload: dict) -> str:
+    values = [payload.get("orderid"), payload.get("orderId")]
+    for payment in _payment_candidates(payload):
+        values.extend((payment.get("orderid"), payment.get("orderId")))
+
+    for value in values:
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    return ""
+
+
+def _authenticate_tilda(request: Request) -> None:
+    if not TILDA_WEBHOOK_SECRET:
+        raise HTTPException(
+            status_code=503,
+            detail="Tilda webhook authentication is not configured",
+        )
+
+    supplied_token = request.headers.get("X-Tilda-Webhook-Token")
+    if not supplied_token or not hmac.compare_digest(
+        supplied_token.encode("utf-8"), TILDA_WEBHOOK_SECRET.encode("utf-8")
+    ):
+        raise HTTPException(status_code=401, detail="Invalid Tilda webhook token")
 
 
 @app.get("/")
@@ -47,9 +114,53 @@ async def calculate(data: TariffRequest):
 # Создание заказа
 # -------------------------------------------------
 
-@app.post("/create-order")
-async def create_order(order: dict):
-    """Принимает финальный webhook Tilda или готовый order JSON и создает заказ в СДЭК."""
+@app.post(
+    "/create-order",
+    openapi_extra={
+        "requestBody": {
+            "required": True,
+            "content": {
+                "application/json": {"schema": {"type": "object"}},
+                "application/x-www-form-urlencoded": {
+                    "schema": {
+                        "type": "object",
+                        "additionalProperties": {"type": "string"},
+                    }
+                },
+            },
+        }
+    },
+)
+async def create_order(request: Request):
+    """Authenticate Tilda webhook, then process a test or idempotent order."""
+    _authenticate_tilda(request)
+    order = _parse_webhook_body(
+        await request.body(),
+        request.headers.get("content-type", ""),
+    )
+
+    if order.get("test") == "test":
+        return {"status": "ok", "message": "Tilda webhook test received"}
+
+    order_id = _extract_order_id(order)
+    if not order_id:
+        raise HTTPException(status_code=400, detail="Tilda orderid is required")
+
+    store = IdempotencyStore(ORDER_IDEMPOTENCY_DB_PATH)
+    state, saved_result = store.reserve(order_id)
+    if state == "succeeded":
+        return saved_result
+    if state == "processing":
+        raise HTTPException(
+            status_code=409,
+            detail="This orderid is already being processed",
+        )
+    if state == "uncertain":
+        raise HTTPException(
+            status_code=409,
+            detail="Previous CDEK submission outcome is uncertain; verify before retrying",
+        )
+
     try:
         parsed_order = parse_order_payload(order)
 
@@ -88,18 +199,46 @@ async def create_order(order: dict):
             payload = transform_order(parsed_order, tariff_code=selected_tariff_code)
         else:
             payload = transform_order(parsed_order)
-    except ValueError as error:
-        raise HTTPException(status_code=400, detail=str(error))
+    except HTTPException:
+        store.release(order_id)
+        raise
+    except Exception as error:
+        store.release(order_id)
+        if isinstance(error, ValueError):
+            raise HTTPException(status_code=400, detail=str(error)) from None
+        raise
 
-    result = cdek.create_order(payload)
+    try:
+        result = cdek.create_order(payload)
+    except Exception:
+        store.mark_uncertain(order_id)
+        raise HTTPException(
+            status_code=502,
+            detail="CDEK order submission outcome is uncertain; verify before retrying",
+        ) from None
 
     if not result["success"]:
+        if result["status_code"] >= 500:
+            store.mark_uncertain(order_id)
+        else:
+            store.release(order_id)
         raise HTTPException(
             status_code=result["status_code"],
             detail=result["data"],
         )
 
-    return result["data"]
+    response_data = result["data"]
+    entity = response_data.get("entity") if isinstance(response_data, dict) else None
+    cdek_uuid = entity.get("uuid") if isinstance(entity, dict) else None
+    if not cdek_uuid:
+        store.mark_uncertain(order_id)
+        raise HTTPException(
+            status_code=502,
+            detail="CDEK response did not contain an order UUID; verify before retrying",
+        )
+
+    store.complete(order_id, response_data)
+    return response_data
 
 
 # -------------------------------------------------

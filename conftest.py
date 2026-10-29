@@ -11,5 +11,7 @@ os.environ.update(
         "SENDER_SHIPMENT_POINT": "TEST-SHIPMENT-PVZ",
         "SENDER_CITY_CODE": "44",
         "DEFAULT_TARIFF_CODE": "21",
+        "TILDA_WEBHOOK_SECRET": "test-webhook-secret",
+        "ORDER_IDEMPOTENCY_DB_PATH": "unused-test-default.sqlite3",
     }
 )
